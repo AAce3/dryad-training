@@ -1,0 +1,17 @@
+[package]
+name = "dryad-training"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "dryad_training"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21.0", features = ["extension-module"] }
+numpy = "0.21.0"
+anyhow = "1.0.86"
+flate2 = "1.0.30"
+rand = "0.8.5"
+crossbeam = "0.8.4"
