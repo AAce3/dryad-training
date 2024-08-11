@@ -7,7 +7,7 @@ use std::{
 use crossbeam::channel::Sender;
 use flate2::bufread::GzDecoder;
 
-use super::{chunk_parser::ChunkParser, dataloader::BatchItem};
+use super::{chunk_parser::{ChunkParser, DiffFocusCalculator}, dataloader::BatchItem};
 
 pub const CHUNK_CAPACITY: usize = 1 << 25; // 32 MB
 
@@ -15,12 +15,15 @@ pub struct DataWorker {
     directory: Arc<Mutex<ReadDir>>,
     chunk_parser: ChunkParser,
     batch_sender: Sender<Option<BatchItem>>,
+    diff_focus_params: DiffFocusCalculator,
 }
 
 impl DataWorker {
     pub fn new(
         directory: &Arc<Mutex<ReadDir>>,
         sender_queue: &Sender<Option<BatchItem>>,
+        diff_focus_min: f32,
+        diff_focus_slope: f32
     ) -> Option<Self> {
     
         let chunk_parser = ChunkParser::default();
@@ -28,6 +31,7 @@ impl DataWorker {
             directory: Arc::clone(directory),
             chunk_parser,
             batch_sender: sender_queue.clone(),
+            diff_focus_params: DiffFocusCalculator::new(diff_focus_min, diff_focus_slope),
         })
     }
 
@@ -43,7 +47,7 @@ impl DataWorker {
     }
 
     fn next_item(&mut self) -> Option<BatchItem> {
-        let next_item = self.chunk_parser.next_item();
+        let next_item = self.chunk_parser.next_item(&mut self.diff_focus_params);
         match next_item {
             item @ Some(_) => item,
             None => {

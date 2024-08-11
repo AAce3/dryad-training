@@ -1,35 +1,39 @@
 use std::{
     fs, mem,
-    path::Path,
     sync::{Arc, Mutex},
     thread,
 };
 
 use crossbeam::channel::{self, Receiver};
-use numpy::ndarray::{Array1, Array3};
-use rand::{rngs::ThreadRng, seq::SliceRandom};
+use pyo3::{exceptions::PyValueError, pyclass, pymethods, PyErr, PyResult};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
-use crate::data_processing::file_parser::DataWorker;
+use super::file_parser::DataWorker;
 
+#[pyclass]
 pub struct DataLoader {
     shufflebuffer: ShuffleBuffer,
     batch_receiver: Receiver<Option<BatchItem>>,
     active_thread_count: usize,
 }
 
+#[pymethods]
 impl DataLoader {
+    #[new]
     pub fn new(
-        directory: impl AsRef<Path>,
+        directory: &str,
         num_threads: usize,
         max_shufflebuffer_capacity: usize,
         batch_size: usize,
-    ) -> Option<DataLoader> {
+        diff_focus_min: f32,
+        diff_focus_slope: f32,
+    ) -> PyResult<Self> {
         let (batch_sender, batch_receiver) = channel::bounded(batch_size * num_threads);
         let mut spawned_threads = 0;
-        let dir = Arc::new(Mutex::new(fs::read_dir(directory).ok()?));
+        let dir = Arc::new(Mutex::new(fs::read_dir(directory)?));
 
         for _ in 0..num_threads {
-            let new_worker = DataWorker::new(&dir, &batch_sender);
+            let new_worker = DataWorker::new(&dir, &batch_sender, diff_focus_min, diff_focus_slope);
             if let Some(mut worker) = new_worker {
                 thread::spawn(move || worker.process_loop());
                 spawned_threads += 1;
@@ -39,7 +43,9 @@ impl DataLoader {
         }
 
         if spawned_threads == 0 {
-            return None;
+            return Err(PyErr::new::<PyValueError, _>(
+                "Failed to create dataloader from {directory}!",
+            ));
         }
 
         let shufflebuffer = ShuffleBuffer::new_uninit(max_shufflebuffer_capacity);
@@ -52,13 +58,17 @@ impl DataLoader {
 
         dataloader.fill_shufflebuffer();
 
-        Some(dataloader)
+        Ok(dataloader)
     }
 
     pub fn next_item_shuffled(&mut self) -> Option<BatchItem> {
         let next_item = self.next_item_unshuffled();
         self.shufflebuffer.random_replace(next_item)
     }
+}
+
+impl DataLoader {
+    
 
     fn fill_shufflebuffer(&mut self) {
         while self.shufflebuffer.items.len() < self.shufflebuffer.items.capacity() {
@@ -89,14 +99,14 @@ impl DataLoader {
 
 struct ShuffleBuffer {
     items: Vec<BatchItem>,
-    rng: ThreadRng,
+    rng: StdRng,
 }
 
 impl ShuffleBuffer {
     fn new_uninit(max_capacity: usize) -> Self {
         Self {
             items: Vec::with_capacity(max_capacity),
-            rng: rand::thread_rng(),
+            rng: StdRng::from_entropy(),
         }
     }
 
@@ -115,11 +125,28 @@ impl ShuffleBuffer {
     }
 }
 
-#[derive(Default)]
+#[pyclass]
 pub struct BatchItem {
-    pub input_planes: Array3<f32>,
-    pub policy_target: Array1<f32>,
+    #[pyo3(get)]
+    pub input_planes: Vec<f32>,
+    #[pyo3(get)]
+    pub policy_target: Vec<f32>,
+    #[pyo3(get)]
     pub wdl_target: [f32; 3],
+    #[pyo3(get)]
     pub q_target: f32,
+    #[pyo3(get)]
     pub mlh_target: f32,
+}
+
+impl Default for BatchItem {
+    fn default() -> Self {
+        Self {
+            input_planes: vec![0.0; 112 * 8 * 8],
+            policy_target: vec![0.0; 1858],
+            wdl_target: Default::default(),
+            q_target: Default::default(),
+            mlh_target: Default::default(),
+        }
+    }
 }

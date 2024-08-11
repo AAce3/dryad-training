@@ -1,16 +1,20 @@
-pub mod data_processing;
+pub mod autoconverter;
+pub mod chunk_parser;
+pub mod dataloader;
+pub mod file_parser;
+mod policy_names;
 
+use autoconverter::{auto_convert, process_leela_data};
+
+use dataloader::{BatchItem, DataLoader};
 use pyo3::prelude::*;
 
-/// Formats the sum of two numbers as string.
-#[pyfunction]
-fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-    Ok((a + b).to_string())
-}
-
-/// A Python module implemented in Rust.
 #[pymodule]
-fn dryad_training(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
+fn data_processing(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(auto_convert, m)?)?;
+    m.add_function(wrap_pyfunction!(process_leela_data, m)?)?;
+    m.add_class::<BatchItem>()?;
+    m.add_class::<DataLoader>()?;
     Ok(())
 }
+

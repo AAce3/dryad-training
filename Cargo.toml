@@ -5,13 +5,20 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "dryad_training"
+name = "data_processing"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.21.0", features = ["extension-module"] }
-numpy = "0.21.0"
+ndarray = "0.16.0"
 anyhow = "1.0.86"
 flate2 = "1.0.30"
 rand = "0.8.5"
 crossbeam = "0.8.4"
+smallvec = "1.13.2"
+reqwest = { version = "0.12.5", features = ["blocking"] }
+scraper = "0.20.0"
+chrono = "0.4.38"
+tar = "0.4.41"
+rayon = "1.10.0"
+tempfile = "3.12.0"
