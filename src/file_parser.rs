@@ -62,7 +62,10 @@ impl DataWorker {
         let next_chunk = self.directory.lock().unwrap().next()?.unwrap();
         let file = File::open(next_chunk.path()).unwrap();
         let mut chunk = GzDecoder::new(BufReader::with_capacity(CHUNK_CAPACITY, file));
-        chunk.read_to_end(&mut self.chunk_parser.buffer).unwrap();
+        if chunk.read_to_end(&mut self.chunk_parser.buffer).is_err() {
+            return self.fill_next_chunk();
+        }
+        
         Some(())
     }
 
