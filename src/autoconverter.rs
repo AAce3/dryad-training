@@ -1,14 +1,8 @@
 use std::{
-    collections::HashSet,
-    fs::{self, File, OpenOptions, ReadDir},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
-    mem,
-    path::Path,
-    process::Command,
-    sync::{
+    collections::HashSet, env, fs::{self, File, OpenOptions, ReadDir}, io::{self, BufRead, BufReader, BufWriter, Read, Write}, mem, path::Path, process::Command, sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
-    },
+    }
 };
 
 use chrono::{DateTime, Utc};
@@ -39,6 +33,7 @@ pub fn auto_convert(
     uncertainty_lambda: f32,
     excluded_files_path: &str,
 ) -> PyResult<()> {
+    env::set_var("RUST_BACKTRACE", "1");
     const URL: &str = "https://storage.lczero.org/files/training_data/test80/";
     let response = blocking::get(URL).unwrap().text().unwrap();
     let document = Html::parse_document(&response);
@@ -79,6 +74,7 @@ pub fn auto_convert(
 
     let processed_files = Arc::new(Mutex::new(vec![]));
 
+
     threadpool.install(|| {
         files
             .par_iter()
@@ -94,13 +90,14 @@ pub fn auto_convert(
                     blocking::get(url).unwrap(),
                 ));
 
-                println!("Successfully downloaded file {href}!");
 
                 processed_files.lock().unwrap().push(href.to_string());
 
                 let downloaded_dir = tempdir()?;
 
                 response.unpack(&downloaded_dir)?;
+
+                println!("Successfully downloaded file {href}!");
 
                 let rescored_files = rescore_data(
                     rescorer_path,
@@ -156,6 +153,8 @@ pub fn process_leela_data(
     uncertainty_lambda: f32,
     delete_original: bool,
 ) -> PyResult<()> {
+    env::set_var("RUST_BACKTRACE", "1");
+
     if !Path::new(output_dir).exists() {
         fs::create_dir_all(output_dir)?;
     }
