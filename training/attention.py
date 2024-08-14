@@ -5,7 +5,7 @@ import torch.nn as nn
 
 class RelativeMultiHeadAttention(nn.Module):
     def __init__(self, embedding_dim: int, num_heads: int, num_layers: int):
-        from model import beta, deepnorm_init
+        from model import deepnorm_init
 
         super().__init__()
         assert embedding_dim % num_heads == 0
@@ -14,8 +14,8 @@ class RelativeMultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embedding_dim // num_heads
 
-        self.relative_position_qk = RelativePosition(embedding_dim, 1)
-        self.relative_position_v = RelativePosition(embedding_dim, beta(num_layers))
+        self.relative_position_qk = RelativePosition(embedding_dim)
+        self.relative_position_v = RelativePosition(embedding_dim)
 
         self.fc_q = nn.Linear(embedding_dim, embedding_dim)
         self.fc_k = nn.Linear(embedding_dim, embedding_dim)
@@ -143,11 +143,11 @@ class RelativeMultiHeadAttention(nn.Module):
 # for example, the weight between a1 and h1 should be the same as the weight between a8 and h8, due to the
 # fact that they are the same distance as each other.
 class RelativePosition(nn.Module):
-    def __init__(self, head_dim: int, xavier_gain: float):
+    def __init__(self, head_dim: int):
         super().__init__()
         self.embedding_dim = head_dim
         self.embeddings = nn.Parameter(torch.Tensor(15, 15, head_dim))
-        nn.init.xavier_uniform_(self.embeddings, gain=xavier_gain)
+        nn.init.constant_(self.embeddings, 0)
 
         range_vec = torch.arange(8)
         distance_matrix = (range_vec[None, :] - range_vec[:, None]).long() + 7
