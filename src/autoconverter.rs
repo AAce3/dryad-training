@@ -1,24 +1,40 @@
 use std::{
-    collections::HashSet, env, fs::{self, File, OpenOptions, ReadDir}, io::{self, BufRead, BufReader, BufWriter, Read, Write}, mem, path::Path, process::Command, sync::{
+    collections::HashSet,
+    env,
+    io::{BufRead, Write},
+    mem,
+    path::Path,
+    sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
-    }
+    },
 };
 
-use chrono::{DateTime, Utc};
-use flate2::{bufread::GzDecoder, Compression, GzBuilder};
-use pyo3::{pyfunction, PyResult};
-use rand::Rng;
-use rayon::{
-    iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
-    ThreadPoolBuilder,
+use async_compression::{
+    tokio::{bufread::GzipDecoder, write::GzipEncoder},
+    Level,
 };
+use chrono::{DateTime, Utc};
+use pyo3::{pyfunction, PyResult};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+
 use reqwest::blocking;
 use scraper::{Html, Selector};
 use tar::Archive;
-use tempfile::{tempdir, TempDir};
+use tempfile::{tempdir, NamedTempFile, TempDir};
+
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    runtime,
+    sync::Semaphore,
+};
 
 use super::chunk_parser::{generate_q_target, transmute_slice, LeelaV6Data};
+
+use futures::StreamExt;
+
+const URL: &str = "https://storage.lczero.org/files/training_data/test80/";
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
@@ -34,7 +50,6 @@ pub fn auto_convert(
     excluded_files_path: &str,
 ) -> PyResult<()> {
     env::set_var("RUST_BACKTRACE", "1");
-    const URL: &str = "https://storage.lczero.org/files/training_data/test80/";
     let response = blocking::get(URL).unwrap().text().unwrap();
     let document = Html::parse_document(&response);
     let selector = Selector::parse("a").unwrap();
@@ -49,86 +64,98 @@ pub fn auto_convert(
         }
     }
 
-    let threadpool = ThreadPoolBuilder::new()
-        .num_threads(num_threads as usize)
-        .build()
-        .unwrap();
-
     files.reverse();
 
     let file_count = Arc::new(AtomicUsize::default());
 
     if !Path::new(output_dir).exists() {
-        fs::create_dir_all(output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
     }
 
     let mut excluded_names: HashSet<String> = HashSet::new();
-    let excluded_files = File::open(excluded_files_path);
+    let excluded_files = std::fs::File::open(excluded_files_path);
 
     if let Ok(file) = excluded_files {
-        let reader = BufReader::new(file);
+        let reader = std::io::BufReader::new(file);
         for item in reader.lines() {
             excluded_names.insert(item?);
         }
     }
 
+    let builder = runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(num_threads as usize)
+        .build()?;
+
+    let mut handles = vec![];
     let processed_files = Arc::new(Mutex::new(vec![]));
 
+    let downloader_limit = Arc::new(Semaphore::new(num_threads as usize));
+    let rescorer_limit = Arc::new(Semaphore::new(num_threads as usize));
 
-    threadpool.install(|| {
-        files
-            .par_iter()
-            .take(max_files)
-            .filter(|&&a| !excluded_names.contains(a))
-            .try_for_each(|href| -> PyResult<()> {
-                let url = format!("{URL}{href}");
+    for item in files
+        .iter()
+        .take(max_files)
+        .filter(|&&a| !excluded_names.contains(a))
+    {
+        let item = item.to_string();
+        let output_dir = output_dir.to_string();
+        let rescorer_path = rescorer_path.to_string();
+        let syzygy_path = syzygy_path.to_string();
+        let rescorer_args = rescorer_args.clone();
 
-                println!("Downloading file {href}!");
+        let processed_files = Arc::clone(&processed_files);
+        let file_count = Arc::clone(&file_count);
+        let downloader_limit = Arc::clone(&downloader_limit);
+        let rescorer_limit = Arc::clone(&rescorer_limit);
+        let handle = builder.spawn(async move {
+            let downloader_permit = downloader_limit.acquire().await?;
+            let downloaded_dir = download_data(&item, &processed_files).await?;
+            drop(downloader_permit);
 
-                let mut response = Archive::new(BufReader::with_capacity(
-                    1 << 30,
-                    blocking::get(url).unwrap(),
-                ));
+            let rescorer_permit = rescorer_limit.acquire().await?;
 
+            let rescored_files = rescore_data(
+                &rescorer_path,
+                downloaded_dir
+                    .path()
+                    .join(item.strip_suffix(".tar").unwrap())
+                    .to_str()
+                    .unwrap(),
+                &syzygy_path,
+                &rescorer_args,
+                true,
+            )
+            .await?;
 
-                processed_files.lock().unwrap().push(href.to_string());
+            drop(rescorer_permit);
 
-                let downloaded_dir = tempdir()?;
+            preprocess_data(
+                tokio::fs::read_dir(rescored_files.path()).await?,
+                &output_dir,
+                &file_count,
+                sample_rate,
+                uncertainty_lambda,
+                true,
+            )
+            .await?;
 
-                response.unpack(&downloaded_dir)?;
+            println!("Data from {item} was successfully written to {output_dir}.");
+            anyhow::Ok(())
+        });
 
-                println!("Successfully downloaded file {href}!");
+        handles.push(handle);
+    }
 
-                let rescored_files = rescore_data(
-                    rescorer_path,
-                    downloaded_dir
-                        .path()
-                        .join(href.strip_suffix(".tar").unwrap())
-                        .to_str()
-                        .unwrap(),
-                    syzygy_path,
-                    &rescorer_args,
-                    true,
-                )?;
-
-
-                preprocess_data(
-                    fs::read_dir(rescored_files.path())?,
-                    output_dir,
-                    &file_count,
-                    sample_rate,
-                    uncertainty_lambda,
-                    true,
-                )?;
-
-                println!("Data from {href} was successfully written to {output_dir}.");
-
-                Ok(())
-            })
+    builder.block_on(async {
+        for handle in handles {
+            handle.await??;
+        }
+        anyhow::Ok(())
     })?;
 
-    let mut processed_files_output = BufWriter::new(
-        OpenOptions::new()
+    let mut processed_files_output = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(format!("{output_dir}/processed_tars.txt"))?,
@@ -139,6 +166,44 @@ pub fn auto_convert(
     }
 
     Ok(())
+}
+
+async fn download_data(
+    href: &str,
+    processed_files: &Arc<Mutex<Vec<String>>>,
+) -> anyhow::Result<TempDir> {
+    let url = format!("{URL}{href}");
+
+    println!("Downloading file {href}!");
+
+    let downloaded_file = NamedTempFile::new()?;
+
+    let mut downloaded_writer = std::io::BufWriter::with_capacity(1 << 20, &downloaded_file);
+
+    let mut bytes_stream = reqwest::get(&url).await?.bytes_stream();
+
+    while let Some(bytes) = bytes_stream.next().await {
+        downloaded_writer.write_all(&bytes?)?;
+    }
+
+    downloaded_writer.flush()?;
+    drop(downloaded_writer);
+
+    let temp_path = downloaded_file.into_temp_path();
+    let mut archive = Archive::new(std::io::BufReader::with_capacity(
+        1 << 20,
+        std::fs::File::open(temp_path)?,
+    ));
+
+    processed_files.lock().unwrap().push(href.to_string());
+
+    let downloaded_dir = tempdir()?;
+
+    archive.unpack(&downloaded_dir)?;
+
+    println!("Successfully downloaded file {href}!");
+
+    Ok(downloaded_dir)
 }
 
 #[pyfunction]
@@ -152,48 +217,56 @@ pub fn process_leela_data(
     sample_rate: u32,
     uncertainty_lambda: f32,
     delete_original: bool,
-) -> PyResult<()> {
+) -> anyhow::Result<()> {
     env::set_var("RUST_BACKTRACE", "1");
 
     if !Path::new(output_dir).exists() {
-        fs::create_dir_all(output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
     }
-    if !rescorer_path.is_empty() {
-        println!("Rescoring file {input_dir}...");
-        let rescored_files = rescore_data(
-            rescorer_path,
-            input_dir,
-            syzygy_path,
-            &rescorer_args,
-            delete_original,
-        )?;
-        preprocess_data(
-            fs::read_dir(rescored_files.path())?,
-            output_dir,
-            &Arc::new(AtomicUsize::default()),
-            sample_rate,
-            uncertainty_lambda,
-            true,
-        )
-    } else {
-        preprocess_data(
-            fs::read_dir(input_dir)?,
-            output_dir,
-            &Arc::new(AtomicUsize::default()),
-            sample_rate,
-            uncertainty_lambda,
-            delete_original,
-        )
-    }
+
+    runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            if !rescorer_path.is_empty() {
+                let rescored_files = rescore_data(
+                    rescorer_path,
+                    input_dir,
+                    syzygy_path,
+                    &rescorer_args,
+                    delete_original,
+                )
+                .await?;
+                preprocess_data(
+                    tokio::fs::read_dir(rescored_files.path()).await?,
+                    output_dir,
+                    &Arc::new(AtomicUsize::default()),
+                    sample_rate,
+                    uncertainty_lambda,
+                    true,
+                )
+                .await
+            } else {
+                preprocess_data(
+                    tokio::fs::read_dir(input_dir).await?,
+                    output_dir,
+                    &Arc::new(AtomicUsize::default()),
+                    sample_rate,
+                    uncertainty_lambda,
+                    true,
+                )
+                .await
+            }
+        })
 }
 
-fn rescore_data(
+async fn rescore_data(
     rescorer_path: &str,
     input_dir: &str,
     syzygy_paths: &str,
     rescorer_args: &[String],
     delete_original: bool,
-) -> Result<TempDir, io::Error> {
+) -> Result<TempDir, std::io::Error> {
     let should_delete = if delete_original {
         "--delete-files"
     } else {
@@ -208,22 +281,23 @@ fn rescore_data(
         .arg(should_delete)
         .args(rescorer_args)
         .spawn()?;
-    let result = rescorer.wait()?;
+    println!("Rescoring data...");
+    let result = rescorer.wait().await?;
     if !result.success() {
-        return Err(io::Error::other("Failed to run rescorer!"));
+        return Err(std::io::Error::other("Failed to run rescorer!"));
     }
 
     Ok(rescored_dir)
 }
 
-fn preprocess_data(
-    input_files: ReadDir,
+async fn preprocess_data(
+    mut input_files: tokio::fs::ReadDir,
     output_dir: &str,
     file_count: &Arc<AtomicUsize>,
     sample_rate: u32,
     uncertainty_lambda: f32,
     delete_original: bool,
-) -> PyResult<()> {
+) -> anyhow::Result<()> {
     const POS_PER_FILE: usize = 4096;
 
     let curr_time = Utc::now();
@@ -236,19 +310,19 @@ fn preprocess_data(
         Vec::with_capacity(POS_PER_FILE * mem::size_of::<LeelaV6Data>());
     let mut num_items = 0;
 
-    let mut skip_rng = rand::thread_rng();
+    let mut skip_rng = StdRng::from_entropy();
 
-    for file in input_files {
-        let path = file?.path();
+    while let Some(file) = input_files.next_entry().await? {
+        let path = file.path();
         if path.ends_with("LICENSE") {
             continue;
         }
 
-        let file = File::open(&path)?;
+        let file = tokio::fs::File::open(&path).await?;
 
-        let mut reader = GzDecoder::new(BufReader::new(file));
+        let mut reader = GzipDecoder::new(tokio::io::BufReader::new(file));
         input_bytes_buffer.clear();
-        if reader.read_to_end(&mut input_bytes_buffer).is_err() {
+        if reader.read_to_end(&mut input_bytes_buffer).await.is_err() {
             continue;
         }
 
@@ -266,7 +340,7 @@ fn preprocess_data(
                 output_buffer.extend_from_slice(&bytes);
                 num_items += 1;
                 if num_items >= POS_PER_FILE {
-                    write_data(&output_buffer, output_dir, file_count, &curr_time)?;
+                    write_data(&output_buffer, output_dir, file_count, &curr_time).await?;
                     output_buffer.clear();
                     num_items = 0;
                 }
@@ -274,32 +348,34 @@ fn preprocess_data(
         }
 
         if delete_original {
-            fs::remove_file(path)?;
+            tokio::fs::remove_file(path).await?;
         }
     }
 
     if !output_buffer.is_empty() {
-        write_data(&output_buffer, output_dir, file_count, &curr_time)?
+        write_data(&output_buffer, output_dir, file_count, &curr_time).await?
     }
 
     Ok(())
 }
 
-fn write_data(
+async fn write_data(
     output_buffer: &[u8],
     output_dir: &str,
     file_count: &Arc<AtomicUsize>,
     time: &DateTime<Utc>,
-) -> PyResult<()> {
-    let new_file = File::create_new(format!(
+) -> anyhow::Result<()> {
+    let new_file = tokio::fs::File::create_new(format!(
         "{output_dir}/training_processed_{}_{}.gz",
         time.format("%Y%m%d-%H%M"),
         file_count.fetch_add(1, Ordering::Relaxed)
-    ))?;
+    ))
+    .await?;
 
-    let mut gz_encoder = GzBuilder::new().write(new_file, Compression::best());
+    let mut gz_encoder = GzipEncoder::with_quality(new_file, Level::Best);
 
-    gz_encoder.write_all(output_buffer)?;
-    gz_encoder.finish()?.flush()?;
+    gz_encoder.write_all(output_buffer).await?;
+    gz_encoder.flush().await?;
+    gz_encoder.shutdown().await?;
     Ok(())
 }
