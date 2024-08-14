@@ -20,6 +20,16 @@ class Outputs(nn.Module):
             nn.Softmax(dim=1),
         )
 
+        self.uncertainty = nn.Sequential(
+            nn.Linear(embedding_size, wdl_dim),
+            nn.Mish(),
+            nn.Flatten(),
+            nn.Linear(wdl_dim * 64, 128),
+            nn.Mish(),
+            nn.Linear(128, 1),
+            nn.Relu(),
+        )
+
         self.mlh = nn.Sequential(
             nn.Linear(embedding_size, 32),
             nn.Mish(),
@@ -29,15 +39,11 @@ class Outputs(nn.Module):
             nn.Linear(128, 1),
         )
 
-        for layer in self.wdl:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                nn.init.constant_(layer.bias, 0)
-
-        for layer in self.mlh:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                nn.init.constant_(layer.bias, 0)
+        for output_head in [self.wdl, self.uncertainty, self.mlh]:
+            for layer in output_head:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight)
+                    nn.init.constant_(layer.bias, 0)
 
     def forward(
         self, x: torch.Tensor
@@ -45,7 +51,8 @@ class Outputs(nn.Module):
         policy = self.policy.forward(x)
         wdl = self.wdl.forward(x)
         mlh = self.mlh.forward(x)
-        return policy, wdl, mlh
+        uncertainty = self.uncertainty.forward(x)
+        return policy, wdl, mlh, uncertainty
 
 
 class AttentionPolicy(nn.Module):
