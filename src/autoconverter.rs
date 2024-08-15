@@ -95,8 +95,15 @@ pub fn auto_convert(
 
     for item in files
         .iter()
+        .filter(|&&a| {
+            if excluded_names.contains(a) {
+                println!("Skipping {a} as it has been downloaded before");
+                false
+            } else {
+                true
+            }
+        })
         .take(max_files)
-        .filter(|&&a| !excluded_names.contains(a))
     {
         let item = item.to_string();
         let output_dir = output_dir.to_string();
@@ -273,6 +280,7 @@ async fn rescore_data(
         "--no-delete-files"
     };
     let rescored_dir = tempdir()?;
+    println!("Rescoring data...");
     let mut rescorer = Command::new(rescorer_path)
         .arg("rescore")
         .arg(format!("--input={input_dir}"))
@@ -281,8 +289,9 @@ async fn rescore_data(
         .arg(should_delete)
         .args(rescorer_args)
         .spawn()?;
-    println!("Rescoring data...");
+
     let result = rescorer.wait().await?;
+
     if !result.success() {
         return Err(std::io::Error::other("Failed to run rescorer!"));
     }
