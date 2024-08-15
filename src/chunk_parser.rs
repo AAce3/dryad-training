@@ -127,7 +127,7 @@ pub struct LeelaV6Data {
     plies_left: f32,
     result_q: f32,
     result_d: f32,
-    _played_q: f32,
+    played_q: f32,
     _played_d: f32,
     _played_m: f32,
     orig_q: f32,
@@ -140,13 +140,16 @@ pub struct LeelaV6Data {
     short_q_target: f32,
 }
 
+const BLUNDER_THRESHOLD: f32 = 0.1;
+
 // adjust the short-term q target to account for future positions
 pub fn generate_q_target(chunk: &mut [LeelaV6Data], lambda: f32, weight_threshold: f32) {
     for i in 0..chunk.len() {
         let games = &chunk[i..];
         let mut value = 0.0;
+
         for (board_idx, board) in games.iter().enumerate() {
-            let exponent = board_idx;
+            let exponent = board_idx - 1;
             let score_weight = lambda.powi(exponent as i32);
 
             if score_weight < weight_threshold {
@@ -154,12 +157,16 @@ pub fn generate_q_target(chunk: &mut [LeelaV6Data], lambda: f32, weight_threshol
             }
 
             let score = if board_idx % 2 == 0 {
-                -board.root_q
-            } else {
                 board.root_q
+            } else {
+                -board.root_q
             };
 
-            value += score * score_weight
+            value += score * score_weight;
+
+            if board.best_q - board.played_q > BLUNDER_THRESHOLD {
+                break;
+            }
         }
         value *= 1.0 - lambda;
         chunk[i].short_q_target = value;
@@ -328,10 +335,11 @@ impl fmt::Display for LeelaV6Data {
         }
 
         writeln!(f, "   a  b  c  d  e  f  g  h\n")?;
-        let (root_q, best_q, result_q) = (self.root_q, self.best_q, self.result_q);
+        let (root_q, best_q, result_q, st_q) = (self.root_q, self.best_q, self.result_q, self.short_q_target);
         writeln!(f, "Root Q: {}", root_q)?;
         writeln!(f, "Best Q: {}", best_q)?;
         writeln!(f, "Result Q: {}", result_q)?;
+        writeln!(f, "Short term Q: {}", st_q)?;
         writeln!(f, "Probabilities:")?;
 
         let probabilities = self.probabilities;
