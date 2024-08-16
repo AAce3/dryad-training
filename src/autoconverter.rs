@@ -15,13 +15,13 @@ use async_compression::{
     Level,
 };
 use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
 use pyo3::{pyfunction, PyResult};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use reqwest::blocking;
 use scraper::{Html, Selector};
-use tar::Archive;
-use tempfile::{tempdir, NamedTempFile, TempDir};
+use tempfile::{tempdir, TempDir};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -29,10 +29,10 @@ use tokio::{
     runtime,
     sync::Semaphore,
 };
+use tokio_tar::Archive;
+use tokio_util::io::StreamReader;
 
 use super::chunk_parser::{generate_q_target, transmute_slice, LeelaV6Data};
-
-use futures::StreamExt;
 
 const URL: &str = "https://storage.lczero.org/files/training_data/test80/";
 
@@ -183,30 +183,23 @@ async fn download_data(
 
     println!("Downloading file {href}!");
 
-    let downloaded_file = NamedTempFile::new()?;
+    let bytes_stream = reqwest::get(&url)
+        .await?
+        .bytes_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
 
-    let mut downloaded_writer = std::io::BufWriter::with_capacity(1 << 20, &downloaded_file);
-
-    let mut bytes_stream = reqwest::get(&url).await?.bytes_stream();
-
-    while let Some(bytes) = bytes_stream.next().await {
-        downloaded_writer.write_all(&bytes?)?;
-    }
-
-    downloaded_writer.flush()?;
-    drop(downloaded_writer);
-
-    let temp_path = downloaded_file.into_temp_path();
-    let mut archive = Archive::new(std::io::BufReader::with_capacity(
+    let async_reader = StreamReader::new(bytes_stream);
+    
+    let mut archive = Archive::new(tokio::io::BufReader::with_capacity(
         1 << 20,
-        std::fs::File::open(temp_path)?,
+        async_reader,
     ));
 
     processed_files.lock().unwrap().push(href.to_string());
 
     let downloaded_dir = tempdir()?;
 
-    archive.unpack(&downloaded_dir)?;
+    archive.unpack(&downloaded_dir).await?;
 
     println!("Successfully downloaded file {href}!");
 

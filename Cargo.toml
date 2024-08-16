@@ -19,8 +19,10 @@ smallvec = "1.13.2"
 reqwest = { version = "0.12.5", features = ["blocking", "stream"] }
 scraper = "0.20.0"
 chrono = "0.4.38"
-tar = "0.4.41"
 tokio = { version = "1.39.2", features = ["rt-multi-thread", "process"] }
 tempfile = "3.12.0"
+tokio-util = "0.7.11"
+tokio-stream = "0.1.15"
 futures = "0.3.30"
 async-compression = {version = "0.4.12", features = ["tokio", "gzip"] }
+tokio-tar = "0.3.1"
